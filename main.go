@@ -40,14 +40,14 @@ func main() {
 	flag.Parse()
 
 	if *inputFile == "" {
-		fmt.Println(LOGO)
-		fmt.Println("请提供输入文件路径")
+		fmt.Printf(LOGO)
+		fmt.Printf("请提供输入文件路径")
 		return
 	}
 
 	if *passwordToVerify == "" {
-		fmt.Println(LOGO)
-		fmt.Println("请提供需要验证的密码")
+		fmt.Printf(LOGO)
+		fmt.Printf("请提供需要验证的密码")
 		return
 	}
 
@@ -79,7 +79,10 @@ func main() {
 			passwordList = append(passwordList, PasswordRecord{Email: email, HashPass: hashPass})
 		}
 	}
-	file.Close()
+	err = file.Close()
+	if err != nil {
+		return
+	}
 
 	if err := scanner.Err(); err != nil {
 		fmt.Println("Error reading file:", err)
@@ -96,7 +99,12 @@ func main() {
 		fmt.Println("Error creating result file:", err)
 		return
 	}
-	defer resultFile.Close()
+	defer func(resultFile *os.File) {
+		err := resultFile.Close()
+		if err != nil {
+
+		}
+	}(resultFile)
 
 	// 创建一个带缓冲的通道
 	passwordRecordChan := make(chan PasswordRecord, 20)
@@ -130,7 +138,10 @@ func main() {
 		<-sigCh
 		fmt.Println("Program exiting...")
 		close(passwordRecordChan)
-		resultFile.Close()
+		err := resultFile.Close()
+		if err != nil {
+			return
+		}
 		os.Exit(0)
 	}()
 	// 将密码发送到通道
