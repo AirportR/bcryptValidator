@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -18,6 +21,8 @@ type PasswordRecord struct {
 	Email    string
 	HashPass string
 }
+
+var mutex sync.Mutex
 
 func verify(password, hashPass string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hashPass), []byte(password))
@@ -31,6 +36,7 @@ func main() {
 	passwordToVerify := flag.String("password", "", "需要验证的密码")
 	verifyNum := flag.Int("count", -1, "验证限制数量,默认为-1不限制")
 	outputFile := flag.String("output", "", "输出结果文件的路径")
+	threadNum := flag.Int("thread", 4, "运行线程数")
 	flag.Parse()
 
 	if *inputFile == "" {
@@ -46,10 +52,10 @@ func main() {
 	}
 
 	// 从命令行获取输出文件名(可选)
-
 	if *outputFile == "" {
 		*outputFile = filepath.Base(strings.Replace(*inputFile, ".", "_", -1)) + "_result.txt"
 	}
+
 	fmt.Printf("Output file name: %s\n", *outputFile)
 
 	passwordList := make([]PasswordRecord, 0)
@@ -60,7 +66,6 @@ func main() {
 		fmt.Println("Error opening file:", err)
 		return
 	}
-	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
@@ -74,6 +79,7 @@ func main() {
 			passwordList = append(passwordList, PasswordRecord{Email: email, HashPass: hashPass})
 		}
 	}
+	file.Close()
 
 	if err := scanner.Err(); err != nil {
 		fmt.Println("Error reading file:", err)
@@ -92,16 +98,51 @@ func main() {
 	}
 	defer resultFile.Close()
 
-	for _, record := range passwordList {
-		if verify(*passwordToVerify, record.HashPass) {
-			fmt.Printf("Verification succeeded: %s %s --> %s\n", record.Email, *passwordToVerify, record.HashPass)
-			_, err := resultFile.WriteString(fmt.Sprintf("%s,%s,%s\n", record.Email, *passwordToVerify, record.HashPass))
-			if err != nil {
-				fmt.Println(err.Error())
-				continue
+	// 创建一个带缓冲的通道
+	passwordRecordChan := make(chan PasswordRecord, 20)
+	numWorkers := *threadNum
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+	fmt.Println("Worker count:", numWorkers)
+
+	// 启动工作goroutine
+	for i := 0; i < numWorkers; i++ {
+
+		go func() {
+			defer wg.Done()
+			for record := range passwordRecordChan {
+				if verify(*passwordToVerify, record.HashPass) {
+					mutex.Lock()
+					fmt.Printf("Verification succeeded: %s %s --> %s\n", record.Email, *passwordToVerify, record.HashPass)
+					_, err := resultFile.WriteString(fmt.Sprintf("%s,%s,%s\n", record.Email, *passwordToVerify, record.HashPass))
+					if err != nil {
+						fmt.Println(err.Error())
+						continue
+					}
+					mutex.Unlock()
+				}
 			}
-		}
+		}()
 	}
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+		fmt.Println("Program exiting...")
+		close(passwordRecordChan)
+		resultFile.Close()
+		os.Exit(0)
+	}()
+	// 将密码发送到通道
+	for _, record := range passwordList {
+		passwordRecordChan <- record
+	}
+
+	// 关闭通道
+	close(passwordRecordChan)
+
+	// 等待所有工作goroutine完成
+	wg.Wait()
 
 	elapsed := time.Since(start)
 	fmt.Printf("Verifying %d passwords took %.1f seconds\n", len(passwordList), elapsed.Seconds())
